@@ -11,13 +11,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import linopy
+import numpy as np
 import pandas as pd
 import xarray as xr
 from linopy import merge
-
-from numpy import inf, isfinite, isinf, maximum, sqrt, tile
-
 import numpy as np
+from numpy import inf, isfinite, isinf, maximum, sqrt, tile
 from xarray import DataArray, concat, where
 
 from pypsa.common import as_index, expand_series
@@ -1276,9 +1275,7 @@ def define_kirchhoff_voltage_constraints(n: Network, sns: pd.Index) -> None:
                         dims=["name"],
                     )
                     # Move to RHS: -(sum_l C_lk * phase_shift_l_rad) * 1e5
-                    rhs_parts.append(
-                        -(ps_rad_static @ C_static) * 1e5
-                    )
+                    rhs_parts.append(-(ps_rad_static @ C_static) * 1e5)
 
                 # Extendable portion: variable term on LHS
                 ext_names = active_names[ext_series.values]
@@ -1295,7 +1292,9 @@ def define_kirchhoff_voltage_constraints(n: Network, sns: pd.Index) -> None:
         lhs = merge(lhs_parts, dim="snapshot")
         if rhs_parts:
             # rhs_parts are DataArrays indexed by (snapshot, cycle); sum across periods
-            rhs = merge(rhs_parts, dim="snapshot") if len(rhs_parts) > 1 else rhs_parts[0]
+            rhs = (
+                merge(rhs_parts, dim="snapshot") if len(rhs_parts) > 1 else rhs_parts[0]
+            )
             con = lhs == rhs
         else:
             con = lhs == 0
