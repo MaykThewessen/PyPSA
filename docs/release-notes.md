@@ -20,6 +20,10 @@ SPDX-License-Identifier: CC-BY-4.0
 
 - Updated our contribution guidelines outline what we expect from AI-based contributions. See [AI-based Contributions](https://docs.pypsa.org/latest/contributing/contributing/#ai-based-contributions) in our documentation for more details. (<!-- md:pr 1672 -->)
 
+### Features
+
+- Phase-shifting transformers (PSTs, also known as _dwarsregeltransformatoren_) are now fully supported in linear optimal power flow. The new `phase_shift_extendable` attribute on `Transformer` makes the voltage phase-angle shift a per-snapshot decision variable bounded by `phase_shift_min` and `phase_shift_max` (degrees); the optimiser re-taps the PST each snapshot to redistribute flow around cycles, modelling TSO operational tap control. Optimised values are written to `n.transformers_t["phase_shift_opt"]`. Closes issue #456.
+
 ### Bug Fixes
 
 - Fix ramp limit constraints leaking another [Generator](./user-guide/components/generators.md)'s `p_nom` variable into the constraint when a component held both fixed and extendable generators. (<!-- md:pr 1677 -->)
@@ -27,6 +31,8 @@ SPDX-License-Identifier: CC-BY-4.0
 - Fix [`n.statistics.transmission()`][pypsa.statistics.StatisticsAccessor.transmission] returning zero flows when `bus_carrier` is set. (<!-- md:pr 1662 -->)
 
 - Fix [`n.add(..., overwrite=True)`][pypsa.Network.add] leaving stale dynamic attributes from the previously existing component, which silently shadowed the new static values at solve time. `overwrite=True` now behaves consistently with [`n.remove(...)`][pypsa.Network.remove] followed by `n.add(...)`. (<!-- md:pr 1666 -->)
+
+- Static `phase_shift` on `Transformer` components is now included in the cycle-based Kirchhoff Voltage Law constraint in `n.optimize()`. Previously the phase shift was silently dropped in LOPF (only `n.lpf()` and `n.pf()` respected it), causing optimisation results to diverge from subsequent non-linear power-flow verification. Fixes issue #1220.
 
 
 ## [**v1.2.0**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.0) <small>21st April 2026</small> { id="v1.2.0" }
