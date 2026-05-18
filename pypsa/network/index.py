@@ -82,14 +82,11 @@ class NetworkIndexMixin(_NetworkABC):
                       dtype='datetime64[ns]', name='snapshot', freq='h')
 
         """
-        # Check if snapshots contain timezones
-        if isinstance(snapshots, pd.DatetimeIndex) and snapshots.tz is not None:
-            msg = (
-                "Numpy datetime64[ns] objects with timezones are not supported and are "
-                "thus not allowed in snapshots. Please pass timezone-naive timestamps "
-                "(e.g. via ds.values)."
-            )
-            raise ValueError(msg)
+        # tz-aware DatetimeIndex permitted (downstream consumers must remain
+        # tz-consistent across snapshots and any time-aligned data they reindex
+        # to). Upstream v1.2 raised here unconditionally; lifted in this fork
+        # to support tz-aware UTC workflows (CLAUDE.md "always tz-aware UTC"
+        # convention).
 
         # Always create normal pd.Index, never pd.RangeIndex
         if isinstance(snapshots, range):
