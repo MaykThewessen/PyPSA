@@ -171,6 +171,8 @@ SPDX-License-Identifier: CC-BY-4.0
   schemes (two-sided CfDs, one-sided feed-in premiums, cap-and-floor, and virtual /
   baseload PPAs) as a post-processing step on a solved network. (<!-- md:pr 1727 -->)
 
+- Added `pin_terminal_soc` and `boundary_soc` keyword arguments to [`n.optimize.optimize_with_rolling_horizon`][pypsa.optimization.OptimizationAccessor.optimize_with_rolling_horizon]. When enabled, each chunk is solved as a closed cycle by fixing the terminal state of charge of all stores and storage units to a chosen reference level via `state_of_charge_set` and `e_set`. The cyclic flags are temporarily disabled for the duration of the run and restored on exit. Default behaviour is unchanged.
+
 
 ## [**v1.2.1**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.1) <small>19th May 2026</small> { id="v1.2.1" }
 
