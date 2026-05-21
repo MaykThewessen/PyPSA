@@ -14,6 +14,10 @@ SPDX-License-Identifier: CC-BY-4.0
     next update! If you would like to use these features in the meantime, you will need
     to install the `master` branch, e.g. `pip install git+https://github.com/pypsa/pypsa`.-->
 
+<!-- Fork-only bullet (not part of upstream v1.2.1 release notes): -->
+<!-- - Fix ramp limit constraints in multi-investment-period models (issue #1669, PR #1689). -->
+
+
 ## [**v1.2.1**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.1) <small>19th May 2026</small> { id="v1.2.1" }
 
 ### Documentation
