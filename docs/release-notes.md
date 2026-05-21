@@ -25,6 +25,10 @@ SPDX-License-Identifier: CC-BY-4.0
 - Lift `xarray<2026.4` upper bound and bump `linopy>=0.7.0` floor. (<!-- md:pr 1686 -->)
 
 
+<!-- Fork-only bullet (not part of upstream v1.2.1 release notes): -->
+<!-- - Fix ramp limit constraints in multi-investment-period models (issue #1669, PR #1689). -->
+
+
 ## [**v1.2.1**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.1) <small>19th May 2026</small> { id="v1.2.1" }
 
 ### Documentation
