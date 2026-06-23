@@ -14,6 +14,10 @@ SPDX-License-Identifier: CC-BY-4.0
     next update! If you would like to use these features in the meantime, you will need
     to install the `master` branch, e.g. `pip install git+https://github.com/pypsa/pypsa`.
 
+### Features
+
+- Add `Lines.apply_seasonal_rating` helper that converts per-line summer/winter MVA ratings (as published by TSOs in absolute capacity terms) into seasonal `s_max_pu` factors. `s_nom` is left unchanged; the seasonal envelope is expressed relative to it as `rating / s_nom`. (<!-- md:pr 1694 -->)
+
 ### Bug Fixes
 
 - Fix [`n.graph()`][pypsa.network.graph.NetworkGraphMixin.graph] building edges in a non-deterministic order, which could make results that depend on the network's cycles differ between runs. In particular, security-constrained optimization (SCLOPF) now returns consistent results. (<!-- md:pr 1764 -->)

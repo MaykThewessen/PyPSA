@@ -73,6 +73,7 @@ nav:
   - Simulation:
     - Power Flow: user-guide/power-flow.md
     - Linear Power Flow: user-guide/linear-power-flow.md
+    - Seasonal Line Ratings: user-guide/seasonal-line-ratings.md
   - Usage:
     - Components: user-guide/components.md
     - Optimization: user-guide/network-optimization.md
