@@ -101,9 +101,8 @@ class AbstractStatisticsAccessor(ABC):
         # TODO could be moved to Network
         return isinstance(self._n.snapshots, pd.MultiIndex)
 
-    @classmethod
     def _aggregate_timeseries(
-        cls, obj: Any, weights: pd.Series, agg: str | Callable | bool = "sum"
+        self, obj: Any, weights: pd.Series, agg: str | Callable | bool = "sum"
     ) -> Any:
         """Calculate the weighted sum or average of a DataFrame or Series."""
         if not agg:
@@ -119,7 +118,7 @@ class AbstractStatisticsAccessor(ABC):
                 weights = weights / weights.sum()
             agg = "sum"
 
-        return cls._aggregate_with_weights(obj, weights, agg)
+        return self._aggregate_with_weights(obj, weights, agg)
 
     # The following methods are implemented in the concrete classes
     @abstractmethod
@@ -181,6 +180,8 @@ class AbstractStatisticsAccessor(ABC):
             nice_names = options.params.statistics.nice_names
         if nice_names:
             nice_name_series = n.c.carriers.static.nice_name
+            if isinstance(nice_name_series.index, pd.MultiIndex):
+                nice_name_series = nice_name_series.groupby(level="name").first()
             bus_carrier = normalize_carrier_nice_names(nice_name_series, bus_carrier)
             carrier = normalize_carrier_nice_names(nice_name_series, carrier)
 

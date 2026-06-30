@@ -47,6 +47,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _coerce_string_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce `StringDtype` indices, columns and values to `object` dtype.
+
+    Under `future.infer_string` (pandas >= 3.0) string labels become extension
+    arrays that xarray rejects on the `optimize()` indexing path. Drop this once
+    fixed upstream: https://github.com/pydata/xarray/issues/10301.
+    """
+
+    def _coerce_axis(axis: pd.Index) -> pd.Index:
+        if isinstance(axis, pd.MultiIndex):
+            new_levels = [
+                level.astype(object)
+                if isinstance(level.dtype, pd.StringDtype)
+                else level
+                for level in axis.levels
+            ]
+            if any(
+                nl is not ol for nl, ol in zip(new_levels, axis.levels, strict=True)
+            ):
+                axis = axis.set_levels(new_levels)
+            return axis
+        if isinstance(axis.dtype, pd.StringDtype):
+            return axis.astype(object)
+        return axis
+
+    df.index = _coerce_axis(df.index)
+    df.columns = _coerce_axis(df.columns)
+    for col in df.columns:
+        if isinstance(df[col].dtype, pd.StringDtype):
+            df[col] = df[col].astype(object)
+    return df
+
+
 def _get_safe_excel_sheet_name(sheet_name: str) -> str:
     """Convert sheet name to/from safe version for Excel's 31-character limit.
 
@@ -273,10 +306,14 @@ class _ImporterCSV(_Importer):
             fn, index_col=0, encoding=self.encoding, quotechar=self.quotechar
         )
 
-        # Convert NaN to empty strings for object dtype columns to handle custom attributes
-        object_cols = [col for col in df.columns if df[col].dtype == "object"]
-        if object_cols:
-            df[object_cols] = df[object_cols].fillna("")
+        # Convert NaN to empty strings for string columns to handle custom attributes
+        str_cols = [
+            col
+            for col in df.columns
+            if df[col].dtype == "object" or isinstance(df[col].dtype, pd.StringDtype)
+        ]
+        if str_cols:
+            df[str_cols] = df[str_cols].fillna("")
 
         return df
 
@@ -526,10 +563,15 @@ class _ImporterExcel(_Importer):
             if len(df.columns) == 0 and len(df.index) > 0 and df.index[0] == "name":
                 df = df.iloc[1:]  # Remove the first row which contains the index name
 
-            # Convert NaN to empty strings for object dtype columns to handle custom attributes
-            object_cols = [col for col in df.columns if df[col].dtype == "object"]
-            if object_cols:
-                df[object_cols] = df[object_cols].fillna("")
+            # Convert NaN to empty strings for string columns to handle custom attributes
+            str_cols = [
+                col
+                for col in df.columns
+                if df[col].dtype == "object"
+                or isinstance(df[col].dtype, pd.StringDtype)
+            ]
+            if str_cols:
+                df[str_cols] = df[str_cols].fillna("")
 
         except (ValueError, KeyError):
             return None
@@ -921,7 +963,7 @@ class _ImporterNetCDF(_Importer):
                 scenario_index = self.ds.coords["scenario"].to_index()
                 index = pd.MultiIndex.from_product([scenario_index, index])
             df = pd.DataFrame(index=index)
-        return df
+        return _coerce_string_dtypes(df)
 
     def get_series(self, list_name: str) -> Iterable[tuple[str, pd.DataFrame]]:
         """Get dynamic components data."""
@@ -942,7 +984,7 @@ class _ImporterNetCDF(_Importer):
                     )
                     df.columns.names = ["scenario", "name"]
 
-                yield attr[len(t) :], df
+                yield attr[len(t) :], _coerce_string_dtypes(df)
 
     def finish(self) -> None:
         """Finish the import process."""
@@ -1048,13 +1090,18 @@ class _ExporterNetCDF(_Exporter):
 
         Runs post-processing, compression and saving to disk.
         """
+        # pandas>=3 infer_string strings aren't netCDF-writable. Cast to object and
+        # write with the option off to keep NaNs. https://github.com/pydata/xarray/issues/10301
+        for name in list(self.ds.variables):
+            if isinstance(self.ds[name].dtype, pd.StringDtype):
+                self.ds[name] = self.ds[name].astype(object)
         if self.float32:
             self.typecast_float32()
         if self.compression:
             self.set_compression_encoding()
         if self.path is not None:
             _path = Path(self.path)
-            with _path.open("w"):
+            with _path.open("w"), pd.option_context("future.infer_string", False):
                 self.ds.to_netcdf(_path)
 
 
@@ -1131,62 +1178,44 @@ class NetworkIOMixin(_NetworkABC):
         """
         # exportable component types
         allowed_types = (float, int, bool, str) + tuple(np.sctypeDict.values())
+        skip_attrs = {
+            "component_attrs",
+            "df",
+            "pnl",
+            "static",
+            "dynamic",
+            "iterate_components",
+            "_name",
+            "_pypsa_version",
+        }
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r".*component_attrs is deprecated as of 1\.0 and will be removed in 2\.0\..*",
-                category=DeprecationWarning,
-            )
-
-            _attrs = {
-                attr: getattr(self, attr)
-                for attr in dir(self)
-                if (
-                    not attr.startswith("__")
-                    and attr
-                    not in {
-                        "component_attrs",
-                        "df",
-                        "pnl",
-                        "static",
-                        "dynamic",
-                        "iterate_components",
-                    }  # Skip deprecated methods
-                    and isinstance(getattr(self, attr), allowed_types)
-                )
-            }
         _attrs = {}
         for attr in dir(self):
-            if not attr.startswith("__") and attr not in {
-                "component_attrs",
-                "df",
-                "pnl",
-                "static",
-                "dynamic",
-                "iterate_components",
-            }:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=r".*component_attrs is deprecated as of 1\.0 and will be removed in 2\.0\..*",
-                        category=DeprecationWarning,
-                    )
-                    value = getattr(self, attr)
-                if isinstance(value, allowed_types):
-                    # TODO: This needs to be refactored with NetworkData class
-                    # Skip properties without setter, but not 'pypsa_version'
-                    prop = getattr(self.__class__, attr, None)
-                    if (
-                        isinstance(prop, property)
-                        and prop.fset is None
-                        and attr not in ["pypsa_version"]
-                    ):
-                        continue
-                    # Skip `_name` since it is writable
-                    if attr in ["_name", "_pypsa_version"]:
-                        continue
-                    _attrs[attr] = value
+            if attr.startswith("__") or attr in skip_attrs:
+                continue
+            # Skip read-only properties (except pypsa_version) without invoking
+            # their getters, which may emit warnings (e.g. model, objective).
+            prop = getattr(self.__class__, attr, None)
+            if (
+                isinstance(prop, property)
+                and prop.fset is None
+                and attr != "pypsa_version"
+            ):
+                continue
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*component_attrs is deprecated as of 1\.0 and will be removed in 2\.0\..*",
+                    category=DeprecationWarning,
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*the API for how to access components data has changed.*",
+                    category=DeprecationWarning,
+                )
+                value = getattr(self, attr)
+            if isinstance(value, allowed_types):
+                _attrs[attr] = value
         exporter.save_attributes(_attrs)
 
         crs = {}
@@ -1817,7 +1846,7 @@ class NetworkIOMixin(_NetworkABC):
                 )
                 new_static = new_static.drop(duplicated_components)
             else:
-                old_static = old_static.drop(duplicated_components)
+                self.remove(cls_name, duplicated_components)
 
         # Concatenate to new dataframe
         if not old_static.empty:
@@ -1843,6 +1872,7 @@ class NetworkIOMixin(_NetworkABC):
             if not isinstance(new_static.index, pd.MultiIndex)
             else ["scenario", "name"]
         )
+        new_static = _coerce_string_dtypes(new_static)
         self.components[cls_name].static = new_static
 
         # Now deal with time-dependent properties
@@ -1902,6 +1932,7 @@ class NetworkIOMixin(_NetworkABC):
             df.columns.names = ["scenario", "name"]
         else:
             df.columns.names = ["name"]
+        df = _coerce_string_dtypes(df)
 
         # Check if components exist in static df
         diff = df.columns.difference(static.index)
@@ -2397,7 +2428,7 @@ class NetworkIOMixin(_NetworkABC):
 
         # documented at https://docs.pypsa.org/latest/user-guide/components/shunt-impedances
         g_shunt = net.shunt.p_mw.values / net.shunt.vn_kv.values**2
-        b_shunt = net.shunt.q_mvar.values / net.shunt.vn_kv.values**2
+        b_shunt = -net.shunt.q_mvar.values / net.shunt.vn_kv.values**2
 
         d["ShuntImpedance"] = pd.DataFrame(
             {

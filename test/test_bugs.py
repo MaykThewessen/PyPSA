@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""
+Historic bugfix tests file. Prefer adding new tests elsewhere.
+"""
+
 import pickle
 from pathlib import Path
 
@@ -36,6 +40,7 @@ def test_890():
     """
     See https://github.com/PyPSA/PyPSA/issues/890.
     """
+    pytest.importorskip("sklearn")
     n = pypsa.examples.scigrid_de()
     n.calculate_dependent_values()
 

@@ -5,6 +5,7 @@ SPDX-License-Identifier: CC-BY-4.0
 -->
 
 # Release Notes
+
 ## Upcoming Release
 
 !!! info "Upcoming Release"
@@ -15,13 +16,130 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Features
 
-- New Process component mirroring the behavior of a multi-port Link component with explicit rates (efficiency equivalent to the Link) at each bus, including `bus0`. The component allows to flexibly change the reference unit used for associated costs by adjusting the rates. (<!-- md:pr 1333 -->)
+- Add `Lines.apply_seasonal_rating` helper that converts per-line summer/winter MVA ratings (as published by TSOs in absolute capacity terms) into seasonal `s_max_pu` factors. `s_nom` is left unchanged; the seasonal envelope is expressed relative to it as `rating / s_nom`. (<!-- md:pr 1694 -->)
 
-- Add weighted-time delays for Link outputs via new attributes `delay` and `cyclic_delay` (auto-expanded as `delay2`, `delay3`, ... and `cyclic_delay2`, `cyclic_delay3`, ... for additional ports). Delay is interpreted in units of `snapshot_weightings.generators`, with cyclic or non-cyclic boundary behavior. For the Process component the corresponding attributes have explicit numbering (`delay0`, `delay1`, `delay2`, ... and `cyclic_delay0`, `cyclic_delay1`). (<!-- md:pr 1569 -->)
+### Bug Fixes
+
+- Fix [`n.graph()`][pypsa.network.graph.NetworkGraphMixin.graph] building edges in a non-deterministic order, which could make results that depend on the network's cycles differ between runs. In particular, security-constrained optimization (SCLOPF) now returns consistent results. (<!-- md:pr 1764 -->)
+
+
+## [**v1.2.4**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.4) <small>27th June 2026</small> { id="v1.2.4" }
+
+### Bug Fixes
+
+- Fix `optimize()` and [`export_to_netcdf()`][pypsa.Network.export_to_netcdf] failing under pandas `>= 3.0` / `future.infer_string`. String labels are now converted back to `object` on both import and export. (<!-- md:pr 1687 -->)
+
+- Fixed the `suffix` argument of [`n.add`][pypsa.Network.add] and [`n.remove`][pypsa.Network.remove]. Passing a list to both `name` and `suffix` now raises an error instead of silently pairing them. (<!-- md:pr 1682 -->)
+
+- Fixed a collection of issues in the [`n.statistics.*.plot`/`.iplot`][pypsa.statistics.StatisticsAccessor] accessors (<!-- md:pr 1721 -->):
+    - `color=None` now disables color grouping instead of falling back to `"carrier"`.
+    - Passing an unsupported filter (e.g. `carrier` to `prices`) now raises a clear error instead of being silently dropped.
+    - Distribution plots (`box`/`violin`/`histogram`) default to the full time series so they show real distributions.
+    - `box`/`violin` figure height scales with the number of categorical rows (capped at 30 inches).
+    - Static `line`/`scatter` plots honor carrier colors via the palette.
+    - Requested but empty facets stay visible instead of being silently dropped.
+    - `sharex=False`/`sharey=False` keeps tick labels on all faceted subplots.
+    - Interactive plots with a categorical y-axis label every bar and scale the figure height with the number of rows (capped at 2000 pixels), instead of thinning tick labels.
+    - Static faceted plots now accept `col_wrap` to wrap facets across rows.
+    - Multi-period statistics (e.g. `optimal_capacity`) name their per-period columns `period`, so line/area plots no longer fail with `KeyError: 'period'`.
+    - A dimension mapped to `x`/`y`/`color` (e.g. `x="period"`) is no longer also used as an automatic facet.
+    - Filtering by `carrier`/`bus_carrier` on a [`NetworkCollection`][pypsa.NetworkCollection] (or stochastic network) with `nice_names=True` no longer raises `NotImplementedError`.
+    - Non-bar plots of a collection (or stochastic network) of multi-period networks now facet by both the collection/scenario dimension and the period, instead of dropping the period (which made area plots fail with `cannot reshape` and line plots overlap periods).
+    - [`n.statistics.prices`][pypsa.statistics.StatisticsAccessor.prices] accepts any static bus attribute (e.g. `country`) in `groupby`, and its plot accessors support these as dimensions (e.g. `prices.plot.box(facet_row="country")`) instead of failing with a `KeyError`.
+    - Interactive plots render LaTeX carrier names and categorical axes correctly with `pandas>=3` (string-dtype columns).
+- Passing `groupby_time=False` to [`n.statistics.system_cost`][pypsa.statistics.StatisticsAccessor.system_cost] is deprecated and will raise in v2.0; it has no per-snapshot resolution as it includes static capital expenditure. Use `opex(groupby_time=False)` for the time-resolved operational cost. (<!-- md:pr 1721 -->)
+
+- Fix ramp limit constraints spuriously linking across investment period boundaries in multi-investment optimization. Ramp constraints now reset at the first snapshot of each period instead of only at the global first snapshot, which could render feasible pathway models infeasible. (<!-- md:pr 1746 -->)
+
+- Fix temporal clustering producing `*_min_pu > *_max_pu` for some snapshots. Aggregated lower bounds are now clipped to their paired upper bound, both for the floating-point drift in [`segment()`][pypsa.clustering.temporal.TemporalClusteringMixin.segment] and the `e_min_pu`/`e_max_pu` crossover from min/max aggregation rules. (<!-- md:pr 1752 -->)
+
+- Fix `KeyError` in [`n.pf()`][pypsa.network.power_flow.NetworkPowerFlowMixin.pf] and [`n.lpf()`][pypsa.network.power_flow.NetworkPowerFlowMixin.lpf] when a network contains multiple sub-networks and one of them has no transformers (or otherwise lacks a passive branch component present in another sub-network). (<!-- md:pr 1754 -->)
+
+- Fix the sign of the shunt susceptance when importing from pandapower. A shunt with `q_mvar > 0` (inductive) was previously imported with the wrong sign, causing the power flow to diverge from pandapower. (<!-- md:pr 1758 -->)
+
+- A warning is now logged when manually set impedance parameters (`r`, `x`, `g`, `b`, `s_nom`) on transformers or lines with a standard `type` are overridden by the type during [`n.calculate_dependent_values()`][pypsa.network.power_flow.NetworkPowerFlowMixin.calculate_dependent_values], instead of silently discarding them. (<!-- md:pr 1759 -->)
+
+- Fix the `snapshot` index name being dropped from dynamic data when reassigning [`n.snapshots`][pypsa.Network.snapshots]. (<!-- md:pr 1745 -->)
+
+
+## [**v1.2.3**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.3) <small>12th June 2026</small> { id="v1.2.3" }
+
+### Features
+
+- Added compatibility with the stricter dimension alignment handling in the upcoming linopy `>=0.8`. (<!-- md:pr 1708 -->)
+
+### Bug Fixes
+
+- Fix [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__] silently ignoring a static `p_set` attribute. (<!-- md:pr 1703 -->)
+
+- Fix optimization results being silently zeroed for components which are not yet present in the existing dynamic result data. Regression introduced in `v1.2.0`. (<!-- md:pr 1726 -->)
+
+- Avoid redundant traces and legends in interactive statistics bar plots when the color dimension duplicates an axis. (<!-- md:pr 1710 -->)
+
+
+## [**v1.2.2**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.2) <small>25th May 2026</small> { id="v1.2.2" }
+
+### Bug Fixes
+
+- Fix the sign of [Loads](./user-guide/components/loads.md) not being taken into account in the nodal balance constraint when calling [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__]. (<!-- md:pr 1685 -->)
+
+- Fix operational constraints for non-extendable components producing `NaN` bounds when `p_nom` is infinite and `p_min_pu`/`p_max_pu` is zero. The bound now falls back to zero in this case. Relevant for linopy versions `>=0.7` where `NaN` bounds are not dropped explicitly. (<!-- md:pr 1683 -->)
+
+- Lift `xarray<2026.4` upper bound and bump `linopy>=0.7.0` floor. (<!-- md:pr 1686 -->)
+
+
+## [**v1.2.1**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.1) <small>19th May 2026</small> { id="v1.2.1" }
+
+### Documentation
+
+- Updated our contribution guidelines outline what we expect from AI-based contributions. See [AI-based Contributions](https://docs.pypsa.org/latest/contributing/contributing/#ai-based-contributions) in our documentation for more details. (<!-- md:pr 1672 -->)
+
+### Bug Fixes
+
+- Fix ramp limit constraints leaking another [Generator](./user-guide/components/generators.md)'s `p_nom` variable into the constraint when a component held both fixed and extendable generators. (<!-- md:pr 1677 -->)
+
+- Fix [`n.statistics.transmission()`][pypsa.statistics.StatisticsAccessor.transmission] returning zero flows when `bus_carrier` is set. (<!-- md:pr 1662 -->)
+
+- Fix [`n.add(..., overwrite=True)`][pypsa.Network.add] leaving stale dynamic attributes from the previously existing component, which silently shadowed the new static values at solve time. `overwrite=True` now behaves consistently with [`n.remove(...)`][pypsa.Network.remove] followed by `n.add(...)`. (<!-- md:pr 1666 -->)
+
+
+## [**v1.2.0**](https://github.com/PyPSA/PyPSA/releases/tag/v1.2.0) <small>21st April 2026</small> { id="v1.2.0" }
+
+### Features
+
+- New [Process](./user-guide/components/processes.md) components mirroring the behavior of multi-port [Link](./user-guide/components/links.md) components with explicit rates (efficiency equivalent to the Link) at each bus, including `bus0`. The component allows to flexibly change the reference unit used for associated costs by adjusting the rates. (<!-- md:pr 1333 -->)
+
+- Add weighted-time delays for [Link](./user-guide/components/links.md) outputs via new attributes `delay` and `cyclic_delay` (auto-expanded as `delay2`, `delay3`, ... and `cyclic_delay2`, `cyclic_delay3`, ... for additional ports). Delay is interpreted in units of `snapshot_weightings.generators`, with cyclic or non-cyclic boundary behavior. For [Process](./user-guide/components/processes.md) components the corresponding attributes have explicit numbering (`delay0`, `delay1`, `delay2`, ... and `cyclic_delay0`, `cyclic_delay1`). See [:material-notebook-multiple: notebook](./examples/transport-delay.ipynb). (<!-- md:pr 1569 -->)
+
+- Add configurable numerical tolerance for consistency checks via the new [`params.consistency.numerical_tolerance`](./user-guide/options.md) option (default `1e-9`). This prevents false warnings from floating-point noise when comparing attributes like `p_min_pu` vs `p_max_pu`, `p_nom_min` vs `p_nom_max`, and `e_sum_min` vs `e_sum_max`. (<!-- md:pr 1609 -->)
+
+- New parameter `meshed_thresholds` in [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__] for controlling groups of buses in nodal-balance constraints. Use this to save memory in the optimization definition for large networks with many interconnected buses. (<!-- md:pr 1591 -->)
+
+- `p_set` on [Store](./user-guide/components/stores.md) components is now supported in lopf optimisation. (<!-- md:pr 1623 -->)
 
 ### Documentation
 
 - New example notebook modeling oligopolistic behavior in energy markets using Cournot-Nash equilibrium with the fictitious objective approach. See [:material-notebook-multiple: notebook](./examples/imperfect-competition.ipynb).
+
+- Add an example of how to apply operational limits on assets over user-defined periods of time. See [:material-notebook-multiple: notebook](./examples/periodic-operational-limits.ipynb).
+
+### Bug Fixes
+
+- Add a `groupby` argument to statistics map plotting, allowing custom bus grouping (defaults to `['bus', 'carrier']`). (<!-- md:pr 1592 -->)
+
+- Fix `capex`, `installed_capex`, and `opex` statistics to apply `investment_period_weightings["objective"]` for multi-investment-period networks, consistent with the optimization objective weighting. (<!-- md:pr 1646 -->)
+
+- Fix `get_operation` to correctly return the reference operational variable (`p`) for [Link](./user-guide/components/links.md) and [Process](./user-guide/components/processes.md) components instead of `p0`. (<!-- md:pr 1614 -->)
+
+- Fix `market_value` to correctly handle multi-port components ([Links](./user-guide/components/links.md), [Processes](./user-guide/components/processes.md)) by always normalizing revenue with the reference operational variable while allowing `bus_carrier` to filter the revenue contribution in the numerator. (<!-- md:pr 1614 -->)
+
+- Fix `ruff check` errors in documentation hooks. (<!-- md:pr 1612 -->)
+
+- Fix `NetworkCollection` statistic functions failing or returning wrong results when networks have different snapshots or snapshot weightings. (<!-- md:pr 1636 -->)
+
+- Fix `NetworkCollection` statistics failing when using `groupby="name"`. (<!-- md:pr 1653 -->)
+
+- Fix call to `DataFrame/Series.groupby()` in pandas 3.0, dropping the `axis` argument (<!-- md:pr 1596 -->)
 
 - Fix ordering of additional port columns (`bus2`, `bus3`, `efficiency2`, etc.) in multi-port component defaults — they now appear right after their base attribute instead of at the end.
 
@@ -30,6 +148,18 @@ SPDX-License-Identifier: CC-BY-4.0
 - Fixed output of `n.controllable_branches()` to include controllable branches instead of passive branches. (<!-- md:pr 1578 -->)
 
 - Fix `expand_series` losing index name on the resulting DataFrame with pandas >= 3.0, which caused xarray alignment errors in multi-investment period optimization. (<!-- md:pr 1581 -->)
+
+- Fix transmission flows not being displayed on energy balance map plots when `bus_carrier` is specified. The map plot now explicitly requests `at_port=0`, avoiding cancellation from summing both ports. (<!-- md:pr 1592 -->)
+
+- Fix `apply_cmap` failing for `pandas.StringDtype` when using pandas 3.0 (<!-- md:pr 1613 -->)
+
+- Fix identification of port number when checking for missing buses as part of consistency checks (<!-- md:pr 1619 -->)
+
+- Fix `optimize_security_constrained` not supporting MultiIndex `branch_outages` (<!-- md:pr 1637 -->)
+
+- Fix compatibility with pandas 3 (<!-- md:pr 1617 -->)
+
+- Fix spurious `model`/`objective`/`objective_constant` warnings emitted during network export, and clarify the `n.model` warning to distinguish "not optimized yet" from "loaded from file". (<!-- md:pr 1659 -->)
 
 ## [**v1.1.2**](https://github.com/PyPSA/PyPSA/releases/tag/v1.1.2) <small>23rd February 2026</small> { id="v1.1.2" }
 

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy as np
 import pandas as pd
 
 from pypsa._options import options
@@ -32,12 +33,35 @@ logger = logging.getLogger(__name__)
 
 
 def get_operation(n: Network, c: str) -> pd.DataFrame:
-    """Get the operation data for a network component."""
-    if c in n.branch_components:
+    """Get the reference operation data for a network component.
+
+    For passive branches (Lines, Transformers), returns `p0` since no reference
+    `p` attribute exists. For all other components with power output (Links,
+    Processes, one-port components), returns `p` which is the reference
+    operational variable. For Stores, returns `e` (energy level).
+
+    Parameters
+    ----------
+    n : Network
+        The PyPSA network instance.
+    c : str
+        The component name (e.g., 'Generator', 'Link', 'Line', 'Store').
+
+    Returns
+    -------
+    pd.DataFrame
+        Time series of the reference operational variable for the component.
+
+    """
+    if c in n.passive_branch_components:
         return n.c[c].dynamic.p0
     if c == "Store":
         return n.c[c].dynamic.e
-    return n.c[c].dynamic.p
+    p = n.c[c].dynamic.p
+    if p.empty and c in n.branch_components:
+        # Fallback for legacy networks where only p0 is stored (for Links)
+        return n.c[c].dynamic.p0
+    return p
 
 
 def port_efficiency(
@@ -299,9 +323,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
                     Optimal Capacity  ...  Market Value
     Generator gas          982.03448  ...   1559.511099
               wind        7292.13406  ...    589.813549
-    Line      AC          5613.82931  ...    -43.277041
-    Link      DC          4003.90110  ...      0.132018
-    Load      load           0.00000  ...           NaN
+    Line      AC          5613.82931  ...    -21.114555
+    Link      DC          4003.90110  ...      0.066009
+    Load      load           0.00000  ...   -633.512009
     <BLANKLINE>
     [5 rows x 12 columns]
 
@@ -367,20 +391,51 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
     def _concat_periods(
         self, dfs: list[pd.DataFrame] | dict[str, pd.DataFrame], c: str
     ) -> pd.DataFrame:
-        return pd.concat(dfs, axis=1)
+        return pd.concat(dfs, axis=1, names=[self._n.investment_periods.name])
 
-    @staticmethod
+    def _weighted_sum_per_network(
+        self, df: pd.DataFrame, weights: pd.Series
+    ) -> pd.Series:
+        """Compute weighted sums per network if the network is a collection.
+
+        For simple indices, computes `weights @ df` directly. For
+        NetworkCollections, splits by network key and computes
+        `weights @ df` per network.
+        """
+        if not self._n.is_collection:
+            return weights @ df
+
+        n = cast("NetworkCollection", self._n)
+        network_names = n._index_names
+        network_keys = n.index
+
+        results = {}
+        for key in network_keys:
+            sub_weights = weights.loc[key]
+            sub_df = df[key].reindex(sub_weights.index).fillna(0)
+            results[key] = sub_weights @ sub_df
+
+        result = pd.concat(results)
+        for i, name in enumerate(network_names):
+            result.index = result.index.set_names(name, level=i)
+        return result
+
     def _aggregate_with_weights(
+        self,
         df: pd.DataFrame,
         weights: pd.Series,
         agg: str | Callable,
     ) -> pd.Series | pd.DataFrame:
-        if agg == "sum":
-            if isinstance(weights.index, pd.MultiIndex):
-                return df.multiply(weights, axis=0).groupby(level=0).sum().T
-            return weights @ df
-        # Todo: here we leave out the weights, is that correct?
-        return df.agg(agg)
+        if agg != "sum":
+            return df.agg(agg)
+
+        if self._n.is_collection:
+            return self._weighted_sum_per_network(df, weights)
+
+        if isinstance(weights.index, pd.MultiIndex):
+            return df.multiply(weights, axis=0).groupby(level=0).sum().T
+
+        return weights @ df
 
     def _aggregate_components_groupby(
         self, vals: pd.DataFrame, grouping: dict, agg: Callable | str, c: str
@@ -401,11 +456,14 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             if isinstance(vals, pd.Series):
                 vals = vals.rename("value").to_frame()
                 was_series = True
-            res = (
-                vals.assign(**grouping_df)
-                .groupby([*keep_levels, *grouping_df.columns])
-                .agg(agg)
-            )
+            if "name" in grouping_df.columns:
+                keep_levels.append("name")
+            extra_keys = [
+                grouping_df[col]
+                for col in grouping_df.columns
+                if col not in keep_levels
+            ]
+            res = vals.groupby([*keep_levels, *extra_keys]).agg(agg)
             return res["value"] if was_series else res
         return vals.groupby(**grouping).agg(agg)
 
@@ -705,6 +763,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             drop_zero=drop_zero,
             round=round,
         )
+        if self._n.has_investment_periods and not df.empty:
+            weights = self._n.investment_period_weightings["objective"]
+            df = df.multiply(weights, level="period")
         df.attrs["name"] = "Capital Expenditure"
         df.attrs["unit"] = "currency"
         return df
@@ -816,6 +877,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             drop_zero=drop_zero,
             round=round,
         )
+        if self._n.has_investment_periods and not df.empty:
+            weights = self._n.investment_period_weightings["objective"]
+            df = df.multiply(weights, level="period")
         df.attrs["name"] = "Capital Expenditure Fixed"
         df.attrs["unit"] = "currency"
         return df
@@ -1628,6 +1692,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             drop_zero=drop_zero,
             round=round,
         )
+        if self._n.has_investment_periods and not df.empty:
+            weights = self._n.investment_period_weightings["objective"]
+            df = df.multiply(weights, level="period")
         df.attrs["name"] = "Operational Expenditure"
         df.attrs["unit"] = "currency"
         return df
@@ -1718,6 +1785,17 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         Series([], dtype: float64)
 
         """
+        if groupby_time is False:
+            warnings.warn(
+                "Passing `groupby_time=False` to `system_cost` is deprecated and "
+                "will raise an error in version 2.0; system_cost has no per-snapshot "
+                "resolution as it includes static capital expenditure. Use "
+                "`opex(groupby_time=False)` for the time-resolved operational cost. "
+                "Deprecated in version 1.2.3.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            groupby_time = "sum"
         capex = self.capex(
             components=components,
             groupby_method=groupby_method,
@@ -1977,7 +2055,7 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         groupby_method: Callable | str = "sum",
         aggregate_across_components: bool = False,
         groupby: str | Sequence[str] | Callable | Literal[False] = "carrier",
-        at_port: PortsLike | None = None,
+        at_port: PortsLike = "bus0",
         carrier: str | Sequence[str] | None = None,
         bus_carrier: str | Sequence[str] | None = None,
         nice_names: bool | None = None,
@@ -2007,9 +2085,8 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             - `False`: No grouping, return all components individually
             - string or list of strings: Group by column names from [c.static][pypsa.Components]
             - callable: Function that takes network and component name as arguments
-        at_port : PortsLike | None, default=None
+        at_port : PortsLike, default="bus0"
             Which ports to consider:
-            - None: Automatically set to "all" if bus_carrier is specified, otherwise "bus0"
             - "all": All ports of components
             - "bus0": Consider only first port
             - str or list of str: Specific ports to include (e.g., "bus1", "bus2")
@@ -2621,8 +2698,18 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
     ) -> pd.DataFrame:
         """Calculate the **market value** of components in the network.
 
-        Curreny is currency/MWh or currency/unit_{bus_carrier} where unit_{bus_carrier}
-        is the unit of the bus carrier.
+        Currency is given per unit of the component's reference operational
+        variable.
+
+        The market value is always calculated relative to the component's
+        reference operational variable from `get_operation`. Filters such as
+        `bus_carrier` and `at_port` only restrict the revenue contribution in the
+        numerator.
+
+        - **Default (no `bus_carrier`)**: Returns total revenue across all ports
+          divided by the reference operational variable.
+        - **With `bus_carrier`**: Returns revenue at the specified bus carriers'
+          ports divided by the same reference operational variable.
 
         Parameters
         ----------
@@ -2697,21 +2784,47 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             "drop_zero": drop_zero,
             "round": round,
         }
-        df = self.revenue(**kwargs) / self.supply(**kwargs)
+
+        rev = self.revenue(**kwargs)
+
+        @pass_empty_series_if_keyerror
+        def func(n: Network, c: str, port: str) -> pd.Series:
+            p = get_operation(n, c).abs()
+            weights = n.snapshot_weightings.generators
+            return self._aggregate_timeseries(p, weights, agg=groupby_time)
+
+        denom = self._aggregate_components(
+            func,
+            components=components,
+            agg=groupby_method,
+            aggregate_across_components=aggregate_across_components,
+            groupby=groupby,
+            at_port=[0],
+            carrier=carrier,
+            bus_carrier=None,
+            nice_names=nice_names,
+            drop_zero=False,
+            round=None,
+        )
+        if denom.empty:
+            rev[:] = np.nan
+            return rev
+        df = rev / denom
+
         df.attrs["name"] = "Market Value"
-        df.attrs["unit"] = "currency / MWh"
+        df.attrs["unit"] = "currency / operational unit"
         return df
 
     @MethodHandlerWrapper(handler_class=StatisticHandler, inject_attrs={"n": "_n"})
     def prices(  # noqa: D417
         self,
-        groupby: bool = False,
+        groupby: bool | str | Sequence[str] = False,
         weighting: str = "load",
         groupby_time: bool = True,
         bus_carrier: Sequence[str] | str | None = None,
         drop_zero: bool | None = None,
         round: int | None = None,
-    ) -> pd.Series:
+    ) -> pd.Series | pd.DataFrame:
         """Calculate the average marginal prices in the network per bus.
 
         Currency is currency/MWh or currency/unit_{bus_carrier} where
@@ -2725,13 +2838,15 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
 
         Parameters
         ----------
-        groupby : bool | str, optional
-            How to group components:
+        groupby : bool | str | Sequence[str], optional
+            How to group buses:
             - `False`: No grouping, return all buses individually
-            - `"bus_carrier"`: Prices are aggregated to each bus carrier with weights
-              applied.
-            Other grouping options are not supported and the groupby method can not be
-            set. See `weighting` for different weighting options. Defaults to False.
+            - `"bus_carrier"`, `"name"` or any static bus attribute (e.g.
+              `"country"`), or a list thereof: Prices are aggregated per group
+            with weights applied. The groupby method can not be set. See
+            `weighting` for different weighting options. With
+            `groupby_time=False` no aggregation is applied; the groupers only
+            become index levels of the per-bus time series. Defaults to False.
         weighting : str, optional
             Type of weighting to use. If 'load' the prices are weighted by the
             load of the buses and if time they are weighted by snapshot
@@ -2753,8 +2868,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
 
         Returns
         -------
-        pd.DataFrame
-            Time-averaged or load-weighted prices per bus or bus carrier.
+        pd.Series | pd.DataFrame
+            Weighted prices per bus or group (Series), or the full per-bus
+            time series if `groupby_time=False` (DataFrame).
 
         Examples
         --------
@@ -2765,6 +2881,34 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         n = self._n
         sns_weights = n.snapshot_weightings.objective
 
+        if groupby is False:
+            keys = []
+        elif isinstance(groupby, str):
+            keys = [groupby]
+        elif isinstance(groupby, (list, tuple)):
+            keys = list(groupby)
+        else:
+            msg = f"Grouping prices by {groupby!r} is not supported."
+            raise ValueError(msg)
+
+        buses = n.c.buses.static
+        groupers = []
+        for key in keys:
+            col = "carrier" if key == "bus_carrier" else key
+            if col == "name":
+                grouper = buses.index.get_level_values("name").to_series(
+                    index=buses.index
+                )
+            elif col in buses.columns:
+                grouper = buses[col]
+            else:
+                msg = (
+                    f"Grouping prices by '{key}' is not supported. Use 'name', "
+                    f"'bus_carrier' or a static bus attribute."
+                )
+                raise ValueError(msg)
+            groupers.append(grouper.rename(key))
+
         prices = n.c.buses.dynamic.marginal_price
 
         if bus_carrier is not None:
@@ -2774,7 +2918,18 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             prices = prices.loc[:, mask]
 
         if not groupby_time:
-            return prices.T
+            df = prices.T
+            if groupers:
+                # Keep collection index levels (e.g. network) and replace the
+                # bus name level with the requested groupers.
+                kept = [
+                    df.index.get_level_values(level)
+                    for level in df.index.names
+                    if level != "name"
+                ]
+                aligned = [g.reindex(df.index) for g in groupers]
+                df = df.set_index(kept + aligned)
+            return df
 
         if weighting == "load":
             weights = (
@@ -2795,18 +2950,16 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             msg = f"Weighting '{weighting}' is not supported. Use 'load' or 'time'."
             raise ValueError(msg)
 
-        a = sns_weights @ (weights * prices)
-        b = sns_weights @ weights
+        wp = weights * prices
+        a = self._weighted_sum_per_network(wp, sns_weights)
+        b = self._weighted_sum_per_network(weights, sns_weights)
         df = a / b
 
-        if groupby == "bus_carrier":
-            df = df.groupby(n.c.buses.static.carrier).apply(
+        if groupers:
+            aligned = [g.reindex(df.index) for g in groupers]
+            df = df.groupby(aligned).apply(
                 lambda g: (g * b.loc[g.index]).sum() / b.loc[g.index].sum()
             )
-            df.index.name = "bus_carrier"
-        elif groupby is not False:
-            msg = "Only groupby=False and groupby='bus_carrier' are supported."
-            raise ValueError(msg)
 
         df.attrs["name"] = "Prices"
         df.attrs["unit"] = "currency / MWh"
