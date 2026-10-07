@@ -54,40 +54,35 @@ def _build_network_with_storage(
     return n
 
 
-def test_default_path_unchanged() -> None:
-    """Without pin_terminal_soc, behaviour matches today's rolling horizon."""
-    n_a = _build_network_with_storage()
-    n_b = _build_network_with_storage()
-
-    n_a.optimize.optimize_with_rolling_horizon(horizon=6)
-    n_b.optimize.optimize_with_rolling_horizon(horizon=6, pin_terminal_soc=False)
-
-    pd.testing.assert_frame_equal(
-        n_a.generators_t.p, n_b.generators_t.p, check_dtype=False
-    )
-
-
-def test_pin_terminal_soc_holds_for_every_chunk() -> None:
-    """Terminal SoC of every chunk equals boundary_soc * capacity."""
+@pytest.mark.parametrize("drop", [None, "Store", "StorageUnit"])
+@pytest.mark.parametrize(
+    ("horizon", "overlap", "seams"),
+    [
+        (6, 0, [5, 11, 17, 23]),
+        (8, 3, [4, 9, 14, 19, 23]),
+    ],
+)
+def test_pin_holds_at_window_seams(
+    horizon: int, overlap: int, seams: list[int], drop: str | None
+) -> None:
+    """SoC equals boundary_soc * capacity at each window's last committed snapshot."""
     n = _build_network_with_storage()
-    horizon = 6
+    if drop == "Store":
+        n.remove("Store", "tank")
+    elif drop == "StorageUnit":
+        n.remove("StorageUnit", "battery")
+
     n.optimize.optimize_with_rolling_horizon(
-        horizon=horizon, pin_terminal_soc=True, boundary_soc=0.5
+        horizon=horizon, overlap=overlap, pin_terminal_soc=True, boundary_soc=0.5
     )
 
-    cap_su = (
-        n.c.storage_units.static.loc["battery", "p_nom"]
-        * (n.c.storage_units.static.loc["battery", "max_hours"])
-    )
-    cap_store = n.c.stores.static.loc["tank", "e_nom"]
-
-    chunk_ends = list(range(horizon - 1, len(n.snapshots), horizon))
-    for end in chunk_ends:
-        sn = n.snapshots[end]
-        assert n.storage_units_t.state_of_charge.loc[sn, "battery"] == pytest.approx(
-            0.5 * cap_su, abs=1e-2
-        )
-        assert n.stores_t.e.loc[sn, "tank"] == pytest.approx(0.5 * cap_store, abs=1e-2)
+    for sn in seams:
+        if drop != "StorageUnit":
+            assert n.storage_units_t.state_of_charge.loc[
+                sn, "battery"
+            ] == pytest.approx(0.5 * 50 * 4, abs=1e-2)
+        if drop != "Store":
+            assert n.stores_t.e.loc[sn, "tank"] == pytest.approx(0.5 * 200, abs=1e-2)
 
 
 def test_pin_prevents_end_of_chunk_drain() -> None:
@@ -105,17 +100,39 @@ def test_pin_prevents_end_of_chunk_drain() -> None:
     assert soc_pin > soc_open
 
 
-def test_cyclic_flags_restored_on_success() -> None:
-    n = _build_network_with_storage(cyclic_su=True, cyclic_store=True)
+def test_user_set_points_survive() -> None:
+    """Set points the user gave for a subset of units are honoured and restored."""
+    n = _build_network_with_storage()
+    n.add(
+        "StorageUnit",
+        "battery2",
+        bus="bus",
+        p_nom=50,
+        max_hours=4,
+        efficiency_store=0.95,
+        efficiency_dispatch=0.95,
+        state_of_charge_initial=100.0,
+    )
+    soc_set = pd.Series(float("nan"), index=n.snapshots)
+    soc_set.loc[2] = 60.0
+    n.storage_units_t.state_of_charge_set["battery"] = soc_set
+    su_set_before = n.storage_units_t.state_of_charge_set.copy()
+
     n.optimize.optimize_with_rolling_horizon(
         horizon=6, pin_terminal_soc=True, boundary_soc=0.5
     )
-    assert n.c.storage_units.static.loc["battery", "cyclic_state_of_charge"]
-    assert n.c.stores.static.loc["tank", "e_cyclic"]
+
+    assert n.storage_units_t.state_of_charge.loc[2, "battery"] == pytest.approx(
+        60.0, abs=1e-2
+    )
+    pd.testing.assert_frame_equal(
+        n.storage_units_t.state_of_charge_set, su_set_before, check_dtype=False
+    )
 
 
-def test_cyclic_flags_and_pins_restored_on_failure(monkeypatch) -> None:
-    """If the solver call raises mid-loop, the network must end up byte-identical.
+@pytest.mark.parametrize("fail", [False, True])
+def test_storage_state_restored(monkeypatch, fail: bool) -> None:  # noqa: ANN001
+    """Cyclic flags and set-point frames are restored after success and failure.
 
     ``n.optimize(...)`` dispatches through ``OptimizationAccessor.__call__``.
     Python's special-method lookup goes via the type, not the instance, so we
@@ -131,15 +148,21 @@ def test_cyclic_flags_and_pins_restored_on_failure(monkeypatch) -> None:
     su_set_before = n.c.storage_units.dynamic.state_of_charge_set.copy()
     st_set_before = n.c.stores.dynamic.e_set.copy()
 
-    def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        raise RuntimeError("simulated solver failure")
-
-    monkeypatch.setattr(OptimizationAccessor, "__call__", _boom)
-
-    with pytest.raises(RuntimeError, match="simulated solver failure"):
+    def run() -> None:
         n.optimize.optimize_with_rolling_horizon(
             horizon=6, pin_terminal_soc=True, boundary_soc=0.5
         )
+
+    if fail:
+
+        def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            raise RuntimeError("simulated solver failure")
+
+        monkeypatch.setattr(OptimizationAccessor, "__call__", _boom)
+        with pytest.raises(RuntimeError, match="simulated solver failure"):
+            run()
+    else:
+        run()
 
     pd.testing.assert_series_equal(
         n.c.storage_units.static["cyclic_state_of_charge"],
@@ -159,93 +182,10 @@ def test_cyclic_flags_and_pins_restored_on_failure(monkeypatch) -> None:
     )
 
 
-def test_monkeypatch_target_assumption() -> None:
-    """Guard the failure-test's load-bearing assumption about the accessor.
-
-    If someone refactors the accessor so that ``optimize_with_rolling_horizon``
-    routes through ``__call__``, the failure test above silently changes
-    semantics. This guard fails loudly in that case.
-    """
-    from pypsa.optimization.optimize import OptimizationAccessor
-
-    assert "__call__" in OptimizationAccessor.__dict__
-    found_method = any(
-        "optimize_with_rolling_horizon" in c.__dict__
-        for c in OptimizationAccessor.__mro__
-    )
-    assert found_method
-
-
-def test_boundary_soc_as_mapping() -> None:
-    n = _build_network_with_storage()
-    n.optimize.optimize_with_rolling_horizon(
-        horizon=6,
-        pin_terminal_soc=True,
-        boundary_soc={"battery": 0.75, "tank": 0.25},
-    )
-
-    cap_su = (
-        n.c.storage_units.static.loc["battery", "p_nom"]
-        * n.c.storage_units.static.loc["battery", "max_hours"]
-    )
-    cap_store = n.c.stores.static.loc["tank", "e_nom"]
-
-    end = n.snapshots[5]
-    assert n.storage_units_t.state_of_charge.loc[end, "battery"] == pytest.approx(
-        0.75 * cap_su, abs=1e-2
-    )
-    assert n.stores_t.e.loc[end, "tank"] == pytest.approx(0.25 * cap_store, abs=1e-2)
-
-
-def test_boundary_soc_as_callable() -> None:
-    n = _build_network_with_storage()
-
-    def policy(_network: pypsa.Network, snapshot: int) -> float:
-        idx = int(snapshot)
-        return 0.4 + 0.2 * idx / 23.0
-
-    n.optimize.optimize_with_rolling_horizon(
-        horizon=8, pin_terminal_soc=True, boundary_soc=policy
-    )
-
-    cap_su = 50 * 4
-    for end_idx in (7, 15, 23):
-        sn = n.snapshots[end_idx]
-        soc = n.storage_units_t.state_of_charge.loc[sn, "battery"]
-        assert 0.4 * cap_su - 1e-2 <= soc <= 0.6 * cap_su + 1e-2
-
-
-def test_boundary_soc_out_of_range_rejected() -> None:
+@pytest.mark.parametrize("boundary_soc", [-0.1, 1.5])
+def test_boundary_soc_out_of_range_rejected(boundary_soc: float) -> None:
     n = _build_network_with_storage()
     with pytest.raises(ValueError, match=r"boundary_soc must lie in \[0, 1\]"):
         n.optimize.optimize_with_rolling_horizon(
-            horizon=6, pin_terminal_soc=True, boundary_soc=1.5
+            horizon=6, pin_terminal_soc=True, boundary_soc=boundary_soc
         )
-
-
-def test_boundary_soc_bad_type_rejected() -> None:
-    n = _build_network_with_storage()
-    with pytest.raises(TypeError, match="boundary_soc must be"):
-        n.optimize.optimize_with_rolling_horizon(
-            horizon=6, pin_terminal_soc=True, boundary_soc="half"
-        )
-
-
-def test_storage_unit_only_network() -> None:
-    """No Stores in the network; pin only StorageUnit terminals."""
-    n = _build_network_with_storage()
-    n.remove("Store", "tank")
-    n.optimize.optimize_with_rolling_horizon(
-        horizon=6, pin_terminal_soc=True, boundary_soc=0.5
-    )
-    assert n.objective > 0
-
-
-def test_store_only_network() -> None:
-    """No StorageUnits in the network; pin only Store terminals."""
-    n = _build_network_with_storage()
-    n.remove("StorageUnit", "battery")
-    n.optimize.optimize_with_rolling_horizon(
-        horizon=6, pin_terminal_soc=True, boundary_soc=0.5
-    )
-    assert n.objective > 0

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import gc
 import logging
-from collections.abc import Callable, Mapping
 from itertools import product
 from typing import TYPE_CHECKING, Any
 
@@ -186,56 +185,6 @@ def _add_security_constraints(
             )
 
 
-def _validate_fraction(frac: float) -> None:
-    """Reject a SoC fraction outside the unit interval."""
-    if not 0.0 <= frac <= 1.0:
-        msg = f"boundary_soc must lie in [0, 1], got {frac}"
-        raise ValueError(msg)
-
-
-def _make_boundary_resolver(
-    boundary_soc: float | Mapping[str, float] | Callable | None,
-) -> Callable[[Network, Any, str, str], float]:
-    """Normalise the accepted forms of ``boundary_soc`` to a single callable.
-
-    The returned callable has signature
-    ``(network, snapshot, component, unit_name) -> fraction in [0, 1]``.
-    """
-    if boundary_soc is None:
-        boundary_soc = 0.5
-
-    if isinstance(boundary_soc, (int, float)) and not isinstance(boundary_soc, bool):
-        frac = float(boundary_soc)
-        _validate_fraction(frac)
-        return lambda _n, _sn, _c, _u: frac
-
-    if isinstance(boundary_soc, Mapping):
-        mapping = dict(boundary_soc)
-
-        def _resolve_mapping(_n: Network, _sn: Any, _comp: str, unit: str) -> float:
-            frac = float(mapping.get(unit, 0.5))
-            _validate_fraction(frac)
-            return frac
-
-        return _resolve_mapping
-
-    if callable(boundary_soc):
-        user_cb = boundary_soc
-
-        def _resolve_callable(n: Network, sn: Any, _comp: str, _unit: str) -> float:
-            frac = float(user_cb(n, sn))
-            _validate_fraction(frac)
-            return frac
-
-        return _resolve_callable
-
-    msg = (
-        "boundary_soc must be None, a float, a mapping of unit -> float, "
-        "or a callable (network, snapshot) -> float"
-    )
-    raise TypeError(msg)
-
-
 def _save_storage_pin_state(n: Network) -> dict[str, Any]:
     """Snapshot cyclic flags and pin frames, then disable cyclic flags.
 
@@ -264,44 +213,25 @@ def _restore_storage_pin_state(n: Network, saved: dict[str, Any]) -> None:
         n.c.stores.dynamic.e_set = saved["store_set"]
 
 
-def _pin_terminal_soc(
-    n: Network,
-    sns: pd.Index,
-    resolver: Callable[[Network, Any, str, str], float],
-) -> None:
-    """Pin the SoC at the terminal snapshot of ``sns`` for every storage unit and store.
+def _pin_soc_at(n: Network, snapshot: Any, boundary_soc: float) -> None:
+    """Pin the SoC of every storage unit and store at ``snapshot``.
 
-    Uses ``state_of_charge_set`` for ``StorageUnit`` and ``e_set`` for ``Store``.
-    The pin frame spans all network snapshots; only the terminal row is touched,
-    so pins from earlier chunks remain intact.
+    Sets ``state_of_charge_set`` (StorageUnit) and ``e_set`` (Store) to
+    ``boundary_soc`` times capacity at ``snapshot``. Existing set points,
+    including those from earlier windows, are kept.
     """
-    terminal = sns[-1]
-
     if not n.c.storage_units.static.empty:
         su = n.c.storage_units.static
-        cap = su["p_nom"] * su["max_hours"]
-        soc_set = n.c.storage_units.dynamic.state_of_charge_set
-        if soc_set.shape != (len(n.snapshots), len(su.index)):
-            soc_set = pd.DataFrame(
-                np.nan, index=n.snapshots, columns=su.index, dtype=float
-            )
-        for unit in su.index:
-            soc_set.loc[terminal, unit] = (
-                resolver(n, terminal, "StorageUnit", unit) * cap[unit]
-            )
+        soc_set = n.c.storage_units.dynamic.state_of_charge_set.reindex(
+            index=n.snapshots, columns=su.index
+        )
+        soc_set.loc[snapshot] = boundary_soc * su["p_nom"] * su["max_hours"]
         n.c.storage_units.dynamic.state_of_charge_set = soc_set
 
     if not n.c.stores.static.empty:
         st = n.c.stores.static
-        e_set = n.c.stores.dynamic.e_set
-        if e_set.shape != (len(n.snapshots), len(st.index)):
-            e_set = pd.DataFrame(
-                np.nan, index=n.snapshots, columns=st.index, dtype=float
-            )
-        for unit in st.index:
-            e_set.loc[terminal, unit] = (
-                resolver(n, terminal, "Store", unit) * st.loc[unit, "e_nom"]
-            )
+        e_set = n.c.stores.dynamic.e_set.reindex(index=n.snapshots, columns=st.index)
+        e_set.loc[snapshot] = boundary_soc * st["e_nom"]
         n.c.stores.dynamic.e_set = e_set
 
 
@@ -673,16 +603,16 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
         horizon: int = 100,
         overlap: int = 0,
         pin_terminal_soc: bool = False,
-        boundary_soc: float | Mapping[str, float] | Callable | None = None,
+        boundary_soc: float = 0.5,
         **kwargs: Any,
     ) -> Network:
         """Optimize the network in a rolling horizon fashion.
 
         Each chunk is solved independently. By default, the next chunk
         inherits the previous chunk's terminal storage state via
-        ``state_of_charge_initial`` and ``e_initial``. Optionally, each chunk
-        can be solved as a closed cycle by pinning the terminal SoC to a
-        chosen reference level (see ``pin_terminal_soc``).
+        ``state_of_charge_initial`` and ``e_initial``. Optionally, the SoC is
+        pinned to a reference level at each window seam (see
+        ``pin_terminal_soc``).
 
         Parameters
         ----------
@@ -693,22 +623,17 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
         overlap : int
             Number of snapshots to overlap between two iterations. Defaults to 0.
         pin_terminal_soc : bool, default False
-            If True, fix the terminal state of charge of every chunk to
-            ``boundary_soc`` (as a fraction of capacity) via
-            ``state_of_charge_set`` and ``e_set``. The cyclic flags
-            ``cyclic_state_of_charge`` and ``e_cyclic`` are temporarily
-            disabled for the duration of the run and restored on exit. This
-            is useful when a chunk is shorter than the natural storage cycle
-            and the open-ended carry-over would otherwise allow the LP to
-            drain storage at the seam.
-        boundary_soc : float, mapping or callable, optional
-            Reference SoC level used when ``pin_terminal_soc`` is True. A
-            float in [0, 1] is applied to every storage unit and store. A
-            mapping of component name to float allows per-unit overrides. A
-            callable ``(network, snapshot) -> float`` enables time-varying
-            boundaries, evaluated at each chunk's terminal snapshot. Ignored
-            when ``pin_terminal_soc`` is False. Defaults to 0.5 when pinning
-            is enabled.
+            If True, fix the state of charge of every storage unit and store
+            to ``boundary_soc`` times capacity at the last snapshot each
+            window commits, i.e. the seam before the next window starts
+            (overlap snapshots stay free), and at the final snapshot of the
+            last window. Uses ``state_of_charge_set`` and ``e_set``. The
+            cyclic flags ``cyclic_state_of_charge`` and ``e_cyclic`` are
+            disabled during the run; flags and set points are restored on exit.
+        boundary_soc : float, default 0.5
+            Pinned state of charge as a fraction of capacity (``p_nom *
+            max_hours`` for StorageUnit, ``e_nom`` for Store). Must lie in
+            [0, 1]. Ignored when ``pin_terminal_soc`` is False.
         **kwargs:
             Keyword argument used by `linopy.Model.solve`, such as `solver_name`,
 
@@ -721,8 +646,11 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
             msg = "overlap must be smaller than horizon"
             raise ValueError(msg)
 
+        if pin_terminal_soc and not 0 <= boundary_soc <= 1:
+            msg = f"boundary_soc must lie in [0, 1], got {boundary_soc}"
+            raise ValueError(msg)
+
         saved_pin_state = _save_storage_pin_state(n) if pin_terminal_soc else None
-        resolver = _make_boundary_resolver(boundary_soc) if pin_terminal_soc else None
 
         try:
             starting_points = range(0, len(snapshots), horizon - overlap)
@@ -750,7 +678,8 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
                         )
 
                 if pin_terminal_soc:
-                    _pin_terminal_soc(n, sns, resolver)
+                    seam = snapshots[min(start + horizon - overlap, len(snapshots)) - 1]
+                    _pin_soc_at(n, seam, boundary_soc)
 
                 status, condition = n.optimize(sns, **kwargs)
                 if status != "ok":
