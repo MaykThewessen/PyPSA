@@ -275,7 +275,7 @@ def _resample_with_periods(
         )
         for orig, new in zip(
             original_snapshots[orig_mask],
-            [(period, ts) for ts in period_map.values],
+            [(period, ts) for ts in period_map],
             strict=False,
         ):
             snapshot_map[orig] = new

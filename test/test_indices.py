@@ -65,13 +65,9 @@ def test_existing_value_casting(request, network_fixture):
 
 # @pytest.mark.parametrize("meta", [{"test": "test"}, {"test": {"test": "test"}}])
 def test_set_snapshots_checks(network):
-    # Don't allow time zone aware snapshots
-    snapshots_tz = pd.date_range("2020-01-01", "2020-01-02", freq="h", tz="UTC")
-    with pytest.raises(ValueError):
-        network.set_snapshots(snapshots_tz)
-
     # Don't allow more than two dimensions
-    snapshots_more_dims = pd.MultiIndex.from_product([[2020], snapshots_tz, ["test"]])
+    timesteps = pd.date_range("2020-01-01", "2020-01-02", freq="h")
+    snapshots_more_dims = pd.MultiIndex.from_product([[2020], timesteps, ["test"]])
     with pytest.raises(ValueError):
         network.set_snapshots(snapshots_more_dims)
 

@@ -103,6 +103,8 @@ Index([0, 1, 2], dtype='int64', name='snapshot')
 
     For many applications, snapshots represent time intervals and are commonly defined as a `pandas.DatetimeIndex`, for example using `pd.date_range("2024-01-01", periods=168, freq="h")` to create hourly intervals for a week.
 
+    A timezone-aware `pandas.DatetimeIndex`, e.g. `pd.date_range("2024-01-01", periods=168, freq="h", tz="Europe/Amsterdam")`, is supported. Inputs, results and the optimisation model keep the timezone, and file exports restore it on import. With `weightings_from_timedelta=True`, snapshots spanning a daylight saving change get their true duration.
+
 Snapshot weightings are applied to each snapshot, so that snapshots can
 represent more than one hour or fractions of one hour. Three different
 categories of snapshot weightings can be set. Objective weightings are used to

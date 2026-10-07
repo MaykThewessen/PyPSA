@@ -1413,6 +1413,15 @@ class NetworkIOMixin(_NetworkABC):
                 value = getattr(self, attr)
             if isinstance(value, allowed_types):
                 _attrs[attr] = value
+
+        # Snapshots are stored as naive UTC, the timezone as network attribute
+        snapshots = self.snapshot_weightings.reset_index()
+        time_col = "timestep" if "timestep" in snapshots else "snapshot"
+        if isinstance(snapshots[time_col].dtype, pd.DatetimeTZDtype):
+            _attrs["snapshots_tz"] = str(snapshots[time_col].dt.tz)
+            snapshots[time_col] = (
+                snapshots[time_col].dt.tz_convert("UTC").dt.tz_localize(None)
+            )
         exporter.save_attributes(_attrs)
 
         crs = {}
@@ -1423,7 +1432,6 @@ class NetworkIOMixin(_NetworkABC):
         exporter.save_meta(self.meta)
 
         # export snapshots
-        snapshots = self.snapshot_weightings.reset_index()
         exporter.save_snapshots(snapshots)
 
         # export investment period weightings
@@ -1562,6 +1570,8 @@ class NetworkIOMixin(_NetworkABC):
         else:
             pypsa_version = parse_version("0.0.0")
 
+        snapshots_tz = attrs.pop("snapshots_tz", None)
+
         for attr, val in attrs.items():
             if attr in ["model", "objective", "objective_constant"]:
                 setattr(self, f"_{attr}", val)
@@ -1591,6 +1601,11 @@ class NetworkIOMixin(_NetworkABC):
         df = importer.get_snapshots()
 
         if df is not None:
+            if snapshots_tz is not None:
+                time_col = "timestep" if "timestep" in df else "snapshot"
+                df[time_col] = (
+                    df[time_col].dt.tz_localize("UTC").dt.tz_convert(snapshots_tz)
+                )
             if snapshot_levels := {"period", "timestep", "snapshot"}.intersection(
                 df.columns
             ):

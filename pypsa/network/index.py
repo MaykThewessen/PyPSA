@@ -65,7 +65,8 @@ class NetworkIndexMixin(_NetworkABC):
         Parameters
         ----------
         snapshots : list, pandas.Index or pd.MultiIndex
-            All time steps.
+            All time steps. A timezone-aware `pd.DatetimeIndex` (or timestep level)
+            keeps its timezone in all inputs, results and file exports.
         default_snapshot_weightings: float
             The default weight for each snapshot. Defaults to 1.0.
         weightings_from_timedelta: bool
@@ -82,15 +83,6 @@ class NetworkIndexMixin(_NetworkABC):
                       dtype='datetime64[us]', name='snapshot', freq='h')
 
         """
-        # Check if snapshots contain timezones
-        if isinstance(snapshots, pd.DatetimeIndex) and snapshots.tz is not None:
-            msg = (
-                "Numpy datetime64[ns] objects with timezones are not supported and are "
-                "thus not allowed in snapshots. Please pass timezone-naive timestamps "
-                "(e.g. via ds.values)."
-            )
-            raise ValueError(msg)
-
         # Always create normal pd.Index, never pd.RangeIndex
         if isinstance(snapshots, range):
             snapshots = list(snapshots)

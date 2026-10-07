@@ -307,6 +307,18 @@ class TestMultiperiod:
             n.snapshot_weightings["objective"].sum(),
         )
 
+    def test_resample_multiperiod_snapshot_map_keeps_timezone(self):
+        n = pypsa.Network()
+        n.set_snapshots(
+            pd.date_range("2021-03-27", periods=48, freq="h", tz="Europe/Amsterdam")
+        )
+        n.set_investment_periods([2021, 2030])
+        n.add("Bus", "bus0")
+
+        result = resample(n, "3h")
+
+        assert all(s in result.n.snapshots for s in result.snapshot_map)
+
 
 class TestSegment:
     def test_segment_accessor_exists(self, simple_network):
